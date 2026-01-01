@@ -4,7 +4,6 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 import os
 import traceback
-import json
 from datetime import datetime
 
 # 커스텀 모듈 import
@@ -17,11 +16,11 @@ except ImportError:
 
 # ✅ 절대 경로 설정
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ENV_FILE = os.path.join(BASE_DIR, '.env')
+ENV_FILE = os.path.join(BASE_DIR, '../.env')
 load_dotenv(ENV_FILE)
 
 # 템플릿 및 정적 파일 경로 설정
-TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
+TEMPLATE_DIR = os.path.join(BASE_DIR, '../templates')
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 
 # Flask 앱 초기화
@@ -104,7 +103,7 @@ def get_events():
         search_query = request.args.get('company', '').strip()
         category_filter = request.args.get('category', '').strip()
 
-        print(f"🔍 검색어: '{search_query}', 카테고리 필터: '{category_filter}'")
+        print(f"🔍 검색어: '{search_query}', 카테고리 필터: '{category_filter}'")  # 디버그용
 
         # company_events와 companies 테이블 JOIN해서 전체 조회
         response = supabase.table("company_events").select(
@@ -155,8 +154,10 @@ def get_events():
         def sort_key(event):
             date_str = event.get('expected_date')
             if not date_str or date_str == 'TBD':
+                # TBD는 맨 뒤로 (미래로 간주)
                 return ('9999-12-31', '')
             try:
+                # YYYY-MM-DD 또는 YYYY-MM 형식 모두 처리
                 return (date_str, '')
             except:
                 return ('9999-12-31', '')
@@ -164,7 +165,7 @@ def get_events():
         filtered_events.sort(key=sort_key)
         events = filtered_events
 
-        print(f"✅ 필터링 결과: {len(events)}개 이벤트 (시간순 정렬 완료)")
+        print(f"✅ 필터링 결과: {len(events)}개 이벤트 (시간순 정렬 완료)")  # 디버그용
 
         # 프론트엔드용 포맷팅
         formatted_events = []
@@ -298,13 +299,37 @@ def delete_event(event_id):
 
 
 # ============================================
-# API 엔드포인트 - 경제지표
+# API 엔드포인트 - 경제지표 (수정됨)
 # ============================================
 
 @app.route('/api/economic-indicators', methods=['GET'])
 def get_economic_indicators():
     """
     경제지표 조회 API
+
+    쿼리 파라미터:
+    - minDate: 최소 날짜 (YYYY-MM-DD 형식, 이 날짜 이후의 데이터만 조회)
+    - maxDate: 최대 날짜 (YYYY-MM-DD 형식, 선택사항)
+    - month: 조회할 월 (YYYY-MM 형식, minDate가 없을 때만 사용)
+    - limit: 최대 조회 개수 (기본값: 10)
+
+    응답:
+    {
+        "status": "success",
+        "count": 10,
+        "indicators": [
+            {
+                "id": 1,
+                "announcement_date": "2026-01-03",
+                "day": "금",
+                "indicator": "ISM Manufacturing PMI",
+                "previous_value": "47.2",
+                "consensus": "48.2",
+                "category": "ISM",
+                "market_impact": "..."
+            }
+        ]
+    }
     """
     try:
         if supabase is None:
@@ -323,19 +348,27 @@ def get_economic_indicators():
             "id, announcement_date, day, indicator, previous_value, consensus, category, market_impact"
         )
 
+        # minDate가 있으면 그 날짜 이후 데이터만 조회
         if min_date:
             query = query.gte("announcement_date", min_date)
+            print(f"✅ minDate 필터 적용: {min_date} 이후")
 
+        # maxDate가 있으면 그 날짜 이전 데이터만 조회
         if max_date:
             query = query.lte("announcement_date", max_date)
+            print(f"✅ maxDate 필터 적용: {max_date} 이전")
 
+        # minDate, maxDate가 없으면 month 파라미터 사용 (기본값: 현재 월)
         if not min_date and not max_date:
             if not year_month:
                 today = datetime.now()
                 year_month = today.strftime("%Y-%m")
+                print(f"ℹ️ month 기본값 사용: {year_month}")
+
             query = query.gte("announcement_date", f"{year_month}-01").lte(
                 "announcement_date", f"{year_month}-31"
             )
+            print(f"✅ month 필터 적용: {year_month}")
 
         # 정렬 및 제한
         response = query.order("announcement_date", desc=False).limit(limit).execute()
@@ -344,6 +377,7 @@ def get_economic_indicators():
 
         print(f"✅ 경제지표 조회 완료: {len(indicators)}개")
 
+        # 응답 포맷팅
         formatted_indicators = []
         for ind in indicators:
             formatted_indicators.append({
@@ -367,77 +401,6 @@ def get_economic_indicators():
         print(f"❌ Error in get_economic_indicators: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e), 'error_type': type(e).__name__}), 500
-
-
-# ============================================
-# API 엔드포인트 - 마켓 스냅샷 (수정된 로직)
-# ============================================
-
-@app.route('/api/market-snapshot', methods=['GET'])
-def get_market_snapshot():
-    """
-    Supabase nyse_snapshot 테이블에서
-    각 심볼별(SP500, NASDAQ, US20Y, BTC, VIX, GOLD) 최신 데이터를 조회하여 합침
-    """
-    try:
-        if supabase is None:
-            return jsonify({'error': 'Supabase not connected'}), 503
-
-        # DB에 저장된 실제 심볼명 리스트 (로그 확인됨: SP500)
-        target_symbols = ['SP500', 'NASDAQ', 'US20Y', 'BTC', 'VIX', 'GOLD']
-
-        final_data = {}
-        latest_update = None
-
-        print("🔍 마켓 스냅샷 개별 조회 시작...")
-
-        for symbol in target_symbols:
-            try:
-                # 각 심볼별로 가장 최신(updated_at 기준) 1개를 가져옴
-                resp = supabase.table("nyse_snapshot") \
-                    .select("*") \
-                    .eq('symbol', symbol) \
-                    .order('updated_at', desc=True) \
-                    .limit(1) \
-                    .execute()
-
-                # 프론트엔드용 소문자 키 (sp500, nasdaq...)
-                key_map = symbol.lower()
-
-                if resp.data and len(resp.data) > 0:
-                    row = resp.data[0]
-
-                    final_data[key_map] = {
-                        "value": row.get('price'),  # DB 컬럼: price
-                        "change": row.get('change'),  # DB 컬럼: change
-                        "changepct": row.get('change_percent')  # DB 컬럼: change_percent
-                    }
-
-                    # 가장 최근 업데이트 시간 추적
-                    current_update = row.get('updated_at')
-                    if current_update:
-                        if latest_update is None or current_update > (latest_update or ""):
-                            latest_update = current_update
-                else:
-                    # 데이터가 없는 경우 빈 값 처리
-                    final_data[key_map] = {"value": None, "change": None, "changepct": None}
-
-            except Exception as e:
-                print(f"⚠️ {symbol} 조회 실패: {e}")
-                final_data[symbol.lower()] = {"value": None, "change": None, "changepct": None}
-
-        print("🔥 [DEBUG] 최종 조합된 데이터:", final_data)
-
-        return jsonify({
-            "status": "success",
-            "updatedat": latest_update,
-            "data": final_data
-        }), 200
-
-    except Exception as e:
-        print(f"❌ Error in get_market_snapshot: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
 
 
 # ============================================
