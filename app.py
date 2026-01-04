@@ -106,18 +106,34 @@ def get_events():
 
         print(f"🔍 검색어: '{search_query}', 카테고리 필터: '{category_filter}'")
 
-        # company_events와 companies 테이블 JOIN해서 전체 조회
-        response = supabase.table("company_events").select(
-            "id, company_id, event_type, title, description, expected_date, status, "
-            "companies(id, symbol, name)"
-        ).execute()
+        # ✅ 페이지네이션을 사용하여 모든 데이터 가져오기
+        all_events = []
+        page_size = 1000
+        offset = 0
 
-        events = response.data
+        while True:
+            response = supabase.table("company_events").select(
+                "id, company_id, event_type, title, description, expected_date, status, "
+                "companies(id, symbol, name)"
+            ).range(offset, offset + page_size - 1).execute()
+
+            if not response.data:
+                break
+
+            all_events.extend(response.data)
+
+            # 마지막 페이지인지 확인
+            if len(response.data) < page_size:
+                break
+
+            offset += page_size
+
+        print(f"📊 총 조회된 이벤트: {len(all_events)}개")
 
         # 검색어와 카테고리 필터링 (파이썬 레벨)
         filtered_events = []
 
-        for event in events:
+        for event in all_events:
             if not event.get('companies'):
                 continue
 
@@ -162,13 +178,12 @@ def get_events():
                 return ('9999-12-31', '')
 
         filtered_events.sort(key=sort_key)
-        events = filtered_events
 
-        print(f"✅ 필터링 결과: {len(events)}개 이벤트 (시간순 정렬 완료)")
+        print(f"✅ 필터링 결과: {len(filtered_events)}개 이벤트 (시간순 정렬 완료)")
 
         # 프론트엔드용 포맷팅
         formatted_events = []
-        for event in events:
+        for event in filtered_events:
             comp_info = event.get('companies') or {}
             company_symbol = comp_info.get('symbol', 'Unknown')
             company_name = comp_info.get('name', 'Unknown')
@@ -191,8 +206,6 @@ def get_events():
         print(f"❌ Error in get_events: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e), 'error_type': type(e).__name__}), 500
-
-
 @app.route('/api/fetch-events', methods=['POST'])
 def fetch_events_endpoint():
     """Perplexity API로 이벤트 데이터를 가져와 저장"""
